@@ -3,10 +3,10 @@ import os
 import time
 
 # Configuration details (replace with actual values)
-GATEWAY_IP = 'ip_address_of_the_gateway'
+GATEWAY_IP = 'ip_address'
 GATEWAY_USERNAME = 'root'
 GATEWAY_PASSWORD = 'your_password'
-LOCAL_BSP_PATH = '/Users/testUser/BSP_7.1.2.zip'
+LOCAL_BSP_PATH = '/Users/username/BSP_7.1.2.zip'
 REMOTE_BSP_DIR = '/lib/firmware/bsp/'
 REMOTE_SNMP_CONF_DIR = '/etc/opkg/snmpManaged-feed.conf'
 SUDO_PASSWORD = GATEWAY_PASSWORD  # Use gateway password for sudo
@@ -23,7 +23,7 @@ def execute_command(ssh, command, use_sudo=False):
     # Add 'sudo' if needed and current user is not root
     if use_sudo and GATEWAY_USERNAME != 'root':
         command = f"echo {SUDO_PASSWORD} | sudo -S {command}"
-    
+
     stdin, stdout, stderr = ssh.exec_command(command)
     err = stderr.read().decode()
     if err:
@@ -69,6 +69,29 @@ def check_intermediate_upgrades(current_version, target_version):
         return INTERMEDIATE_UPGRADES[current_version]
     else:
         return []
+
+
+# Function to get the BSP file path for a specific version
+def get_bsp_file_for_version(version):
+    """
+    This function returns the path to the BSP file for the given version.
+    """
+    # Dictionary of available BSP files for different versions
+    bsp_files = {
+        "1.6.5": "/path/to/BSP_v1.6.5.zip",   # For upgrading from very old versions
+        "3.1.5": "/path/to/BSP_v3.1.5.zip",   # Intermediate upgrade before 4.x.x
+        "4.0.3": "/path/to/BSP_v4.0.3.zip",   # Upgrade step between v3.x.x and v5.x.x
+        "5.x.x": "/path/to/BSP_v5.x.x.zip",   # Final upgrade to BSP v5.x.x or newer
+        "7.1.2": "/path/to/BSP_7.1.2.zip"     # Latest version
+    }
+    
+    # Check if the version exists in the dictionary, otherwise raise an error
+    if version in bsp_files:
+        return bsp_files[version]
+    else:
+        raise ValueError(f"No BSP file found for version {version}. Please check the version.")
+
+
 
 # Ask user if they want to remove backups based on free space in both / and /backup
 def prompt_for_backup_removal(ssh):
@@ -186,7 +209,7 @@ def initiate_bsp_upgrade(ssh, is_admin_user=False):
 
     # Initiate BSP upgrade
     print("Initiating tektelic-dist-upgrade...")
-    execute_command(ssh, 'tektelic-dist-upgrade -Du', use_sudo=True)
+    execute_command(ssh, 'tektelic-dist-upgrade -Ddu', use_sudo=True)
     print("BSP upgrade initiated.")
     time.sleep(15)  # Wait for the upgrade process to start
 
@@ -276,4 +299,3 @@ def automate_bsp_upgrade():
 # Run the automation
 if __name__ == '__main__':
     automate_bsp_upgrade()
-

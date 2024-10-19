@@ -180,6 +180,22 @@ Before running the script, you need to configure it with your gateway details:
    ```
 3. Replace these values with your actual gateway IP, username, password, and the path to your BSP upgrade package.
 
+4. Find the `get_bsp_file_for_version` function in the script and update the `bsp_files` dictionary with the correct paths for each BSP version:
+   ```python
+   def get_bsp_file_for_version(version):
+       bsp_files = {
+           "1.6.5": "/path/to/BSP_v1.6.5.zip",   # For upgrading from very old versions
+           "3.1.5": "/path/to/BSP_v3.1.5.zip",   # Intermediate upgrade before 4.x.x
+           "4.0.3": "/path/to/BSP_v4.0.3.zip",   # Upgrade step between v3.x.x and v5.x.x
+           "5.x.x": "/path/to/BSP_v5.x.x.zip",   # Final upgrade to BSP v5.x.x or newer
+           "7.1.2": "/path/to/BSP_7.1.2.zip"     # Latest version
+       }
+       # ... rest of the function
+   ```
+
+Replace `/path/to/...` with the actual paths to your BSP files for each version. Ensure you have all the necessary BSP files available at the specified paths.
+
+
 ## Usage
 
 To run the script:
