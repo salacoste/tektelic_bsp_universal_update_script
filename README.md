@@ -250,6 +250,6 @@ This script is provided as-is, without any warranties. Always test in a non-prod
 
 ## Contact
 
-For support or questions, please contact [your contact information or support channel].
+For support or questions, please create an issue / PR.
 
-
+Ivan Dergachev - Sales Engineer - TEKTELIC Comm.
