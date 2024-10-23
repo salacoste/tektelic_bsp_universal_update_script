@@ -6,7 +6,7 @@ import time
 import select
 import re
 import logging
-from pathlib import Path
+import sys
 
 # Configure logging
 logging.basicConfig(
@@ -20,13 +20,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration details
-GATEWAY_IP = '10.7.7.184'
+GATEWAY_IP = '10.7.7.249'
 GATEWAY_USERNAME = 'root'  # Use 'admin' if not root
 GATEWAY_PASSWORD = 'your_password'
 SUDO_PASSWORD = GATEWAY_PASSWORD  # Use gateway password for sudo
-TARGET_BSP_VERSION = "7.1.2"  # Target BSP version to upgrade to
+TARGET_BSP_VERSION = "5.1.1"  # Target BSP version to upgrade to
 BSP_DIR = '/Users/r2d2/Downloads/'  # Directory with BSP archives
-STABILIZATION_WAIT = 60  # Seconds to wait after reboot
+STABILIZATION_WAIT = 30  # Seconds to wait after reboot
 
 # Paths configuration
 REMOTE_BSP_DIR = '/lib/firmware/bsp/'
@@ -66,7 +66,6 @@ OPTIMAL_UPGRADE_PATHS = {
         "6.1.x": ["7.x.x"]
     }
 }
-
 class SSHConnectionError(Exception):
     """Custom exception for SSH connection issues"""
     pass
@@ -79,6 +78,15 @@ class SFTPError(Exception):
     """Custom exception for SFTP related issues"""
     pass
 
+def ensure_sftp_session(ssh):
+    """Ensure an active SFTP session is available"""
+    try:
+        sftp = ssh.open_sftp()
+        return sftp
+    except Exception as e:
+        logger.error(f"Error opening SFTP session: {str(e)}")
+        raise SFTPError(f"Failed to open SFTP session: {str(e)}")
+    
 def execute_command(ssh, command, use_sudo=False, timeout=30):
     """Execute command on remote gateway with timeout and sudo support"""
     try:
@@ -157,7 +165,7 @@ def check_bsp_version(ssh):
         
         for line in output.split('\n'):
             if line.startswith('Description:'):
-                for gw_type in ['Micro', 'Macro', 'Mega']:
+                for gw_type in ['Micro', 'Macro', 'Mega', 'Enterprise']:
                     if gw_type in line:
                         model = gw_type
                         break
@@ -404,35 +412,94 @@ def upload_and_prepare_bsp(ssh, sftp, bsp_file):
             logger.error(f"Failed to cleanup after error: {str(cleanup_error)}")
         raise
 
-def initiate_bsp_upgrade(ssh):
+def initiate_bsp_upgrade(ssh, is_admin_user=False, dry_run=False):
     """Initiate the BSP upgrade process"""
+    print("Initiating BSP upgrade...")
+    env_vars = 'export PATH=/usr/sbin:$PATH && '
+
+    print("Running opkg update...")
+    execute_command(ssh, 'opkg update', use_sudo=(GATEWAY_USERNAME != 'root'))
+    time.sleep(5)
+    print("!!! {dry_run} value 0s for dry_run")
+    if dry_run:
+        print("Skipping actual upgrade initiation (dry-run mode)")
+        return
+
+    # Запускаем обновление
+    print("Starting tektelic-dist-upgrade...")
+    execute_command(ssh, f'{env_vars} tektelic-dist-upgrade -Ddu', use_sudo=(GATEWAY_USERNAME != 'root'))
+    print("BSP upgrade initiated.")
+
+    # Задержка для того, чтобы система успела запустить процесс обновления
+    time.sleep(20)
+
+    # Проверяем, появилось ли состояние "upgrade-in-progress"
+    for attempt in range(10):  # 10 попыток с интервалом в 10 секунд
+        try:
+            current_version_output = execute_command(ssh, 'system_version', use_sudo=(GATEWAY_USERNAME != 'root'))
+            if "upgrade-in-progress" in current_version_output:
+                print("Upgrade process detected. Upgrade in progress.")
+                return
+        except Exception as e:
+            logger.warning(f"Error checking BSP version during upgrade initiation: {str(e)}")
+            time.sleep(10)
+            ssh = reconnect_ssh(max_attempts=20)
+
+    # Если после 10 попыток состояние не обновилось, считаем, что обновление не началось
+    raise Exception("Upgrade did not start properly after multiple checks.")
+
+    """Initiate the BSP upgrade process"""
+    print("Initiating BSP upgrade...")
+    env_vars = 'export PATH=/usr/sbin:$PATH && '
+
+    print("Running opkg update...")
+    execute_command(ssh, 'opkg update', use_sudo=(GATEWAY_USERNAME != 'root'))
+    time.sleep(5)
+
+    if dry_run:
+        print("Skipping actual upgrade initiation (dry-run mode)")
+        return
+
+    # Запускаем обновление
+    print("Starting tektelic-dist-upgrade...")
+    execute_command(ssh, f'{env_vars} tektelic-dist-upgrade -Ddu', use_sudo=(GATEWAY_USERNAME != 'root'))
+    print("BSP upgrade initiated.")
+
+    # Задержка для того, чтобы система успела запустить процесс обновления
+    time.sleep(20)
+
+    # Проверяем, появилось ли состояние "upgrade-in-progress"
+    for attempt in range(10):  # 10 попыток с интервалом в 10 секунд
+        try:
+            current_version_output = execute_command(ssh, 'system_version', use_sudo=(GATEWAY_USERNAME != 'root'))
+            if "upgrade-in-progress" in current_version_output:
+                print("Upgrade process detected. Upgrade in progress.")
+                return
+        except Exception as e:
+            logger.warning(f"Error checking BSP version during upgrade initiation: {str(e)}")
+            time.sleep(10)
+            ssh = reconnect_ssh(max_attempts=20)
+
+    # Если после 10 попыток состояние не обновилось, считаем, что обновление не началось
+    raise Exception("Upgrade did not start properly after multiple checks.")
+
+def process_upgrade_progress_messages(ssh):
+    """
+    Process and log the upgrade progress messages sent by the gateway.
+    """
     try:
-        logger.info("Initiating BSP upgrade...")
-        
-        # Verify system state before upgrade
-        version, model, upgrade_in_progress = check_bsp_version(ssh)
-        if upgrade_in_progress:
-            raise Exception("System is already in upgrade state")
-        
-        # Update package manager
-        logger.info("Updating package manager...")
-        execute_command(ssh, 'opkg update', use_sudo=True)
-        time.sleep(5)
-        
-        logger.info("Starting tektelic-dist-upgrade...")
-        upgrade_command = 'PATH=$PATH:/usr/sbin tektelic-dist-upgrade -Ddu'
-        execute_command(ssh, upgrade_command, use_sudo=True)
-        
-        time.sleep(5)
-        _, _, upgrade_started = check_bsp_version(ssh)
-        if not upgrade_started:
-            raise Exception("Upgrade did not start properly")
-            
-        logger.info("BSP upgrade initiated successfully")
-        
+        while True:
+            # Check for new progress messages
+            progress_output = execute_command(ssh, 'dmesg | grep "BSP upgrade progress:" | tail -n 1', use_sudo=True)
+            if progress_output:
+                progress = int(progress_output.split("progress: ")[1])
+                logger.info(f"Upgrade progress: {progress}%")
+            else:
+                break
+            time.sleep(1)
     except Exception as e:
-        logger.error(f"Error initiating upgrade: {str(e)}")
-        raise
+        logger.error(f"Error processing upgrade progress messages: {str(e)}")
+
 def check_and_ensure_space(ssh, required_space, auto_cleanup=True):
     """
     Check if there's enough space and attempt to free up space if needed
@@ -524,7 +591,9 @@ def print_upgrade_plan(current_version, model, upgrade_path, estimated_time, spa
     proceed = input("\nDo you want to proceed with the upgrade? (yes/no): ").lower()
     return proceed == 'yes'
 
-def monitor_upgrade_progress(ssh, timeout=1800, check_interval=1):
+ 
+
+def monitor_upgrade_progress(ssh, timeout=1800, check_interval=15):
     """Monitor the upgrade process and show progress"""
     start_time = time.time()
     upgrade_completed = False
@@ -532,10 +601,10 @@ def monitor_upgrade_progress(ssh, timeout=1800, check_interval=1):
     upgrade_started = False
     reboot_detected = False
     reboot_count = 0
-    MAX_REBOOTS = 3
+    MAX_REBOOTS = 5
     last_activity = time.time()
-    MAX_INACTIVITY = 300  # 5 minutes
-    
+    MAX_INACTIVITY = 120
+
     try:
         # Wait for upgrade to start
         for _ in range(30):
@@ -548,29 +617,29 @@ def monitor_upgrade_progress(ssh, timeout=1800, check_interval=1):
             except Exception as e:
                 logger.warning(f"Error checking BSP version during startup: {str(e)}")
                 time.sleep(1)
-        
+
         if not upgrade_started:
             raise Exception("Upgrade did not start within 30 seconds")
-        
+
         while time.time() - start_time < timeout:
             try:
                 current_time = time.time()
-                
+
                 if current_time - last_activity > MAX_INACTIVITY:
                     raise Exception(f"No activity detected for {MAX_INACTIVITY} seconds")
-                
+
                 # Check system version
                 try:
                     version_output = execute_command(ssh, 'system_version', use_sudo=True)
                     last_activity = current_time
-                    
+
                     if 'upgrade-in-progress' in version_output:
                         logger.info("Upgrade is in progress...")
                     elif upgrade_started:
                         logger.info("System appears to have completed upgrade")
                         upgrade_completed = True
                         break
-                    
+
                 except Exception as e:
                     if upgrade_started and not reboot_detected:
                         logger.info("Lost connection - system might be rebooting...")
@@ -578,10 +647,10 @@ def monitor_upgrade_progress(ssh, timeout=1800, check_interval=1):
                         reboot_count += 1
                         if reboot_count > MAX_REBOOTS:
                             raise Exception(f"Too many reboots detected ({reboot_count})")
-                    
+
                     time.sleep(30)
                     try:
-                        ssh = reconnect_ssh()
+                        ssh = reconnect_ssh(max_attempts=20)
                         if reboot_detected:
                             logger.info("Successfully reconnected after reboot")
                             reboot_detected = False
@@ -589,7 +658,7 @@ def monitor_upgrade_progress(ssh, timeout=1800, check_interval=1):
                     except Exception as reconnect_error:
                         logger.error(f"Failed to reconnect: {str(reconnect_error)}")
                         continue
-                
+
                 # Check progress
                 try:
                     progress_output = execute_command(ssh, 'dmesg | grep "BSP upgrade progress:" | tail -n 1', use_sudo=True)
@@ -602,9 +671,12 @@ def monitor_upgrade_progress(ssh, timeout=1800, check_interval=1):
                             print(f'\rProgress: {progress}%', end='', flush=True)
                 except Exception as progress_error:
                     logger.debug(f"Error checking progress: {str(progress_error)}")
-                
+
+                # Process upgrade progress messages
+                process_upgrade_progress_messages(ssh)
+
                 time.sleep(check_interval)
-                
+
             except Exception as loop_error:
                 logger.error(f"Error in monitoring loop: {str(loop_error)}")
                 if "Too many reboots detected" in str(loop_error):
@@ -613,14 +685,33 @@ def monitor_upgrade_progress(ssh, timeout=1800, check_interval=1):
 
         if not upgrade_completed:
             raise TimeoutError("Upgrade process timed out")
-            
+
         logger.info(f"Waiting {STABILIZATION_WAIT} seconds for system to stabilize...")
-        time.sleep(STABILIZATION_WAIT)
-        
+        time.sleep(STABILIZATION_WAIT * 2)  # Increase stabilization time
+
         print("\nUpgrade process completed!")
-            
+
     except Exception as e:
         logger.error(f"Error monitoring upgrade: {str(e)}")
+        raise
+
+
+
+def upgrade_to_version(ssh, sftp, version, model):
+    """Upgrade the system to the specified version"""
+    logger.info(f"Starting upgrade to version {version}")
+
+    try:
+        bsp_file = get_bsp_file_for_version(version, model)
+        upload_and_prepare_bsp(ssh, sftp, bsp_file)
+        initiate_bsp_upgrade(ssh)
+        monitor_upgrade_progress(ssh)
+
+        logger.info("Waiting for system to stabilize...")
+        time.sleep(STABILIZATION_WAIT)
+
+    except Exception as e:
+        logger.error(f"Error during upgrade to version {version}: {str(e)}")
         raise
 
 def analyze_upgrade_path(current_version, model):
@@ -635,6 +726,12 @@ def analyze_upgrade_path(current_version, model):
         logger.info("Direct upgrade is possible!")
         estimated_time = 20
         space_required = 40
+    elif base_version == "3.x.x":
+        # Special handling for 3.x.x to 5.1.x upgrade
+        upgrade_path = ["4.0.2", TARGET_BSP_VERSION]
+        logger.info("Upgrading from 3.x.x to 5.1.x")
+        estimated_time = 40
+        space_required = 80
     else:
         upgrade_path = OPTIMAL_UPGRADE_PATHS[model].get(base_version)
         if not upgrade_path:
@@ -647,7 +744,6 @@ def analyze_upgrade_path(current_version, model):
     logger.info(f"Required space: {space_required} MB")
     
     return upgrade_path, estimated_time, space_required
-
 def verify_upgrade_path(upgrade_path, model):
     """Verify all required BSP files exist"""
     missing_files = []
@@ -662,22 +758,26 @@ def verify_upgrade_path(upgrade_path, model):
 
 def main():
     """Main function to orchestrate the upgrade process"""
+    dry_run = '--dry-run' in sys.argv
+    if dry_run:
+        print("*** Dry-run mode active. No actual upgrade will be performed. ***")
+
     ssh = None
     sftp = None
-    
+
     try:
         logger.info(f"Connecting to gateway {GATEWAY_IP}")
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(GATEWAY_IP, username=GATEWAY_USERNAME, password=GATEWAY_PASSWORD)
-        
+
         current_version, model, upgrade_in_progress = check_bsp_version(ssh)
         if upgrade_in_progress:
             raise Exception("Gateway is currently in upgrade state. Please wait for it to complete.")
-        
+
         upgrade_path, estimated_time, space_required = analyze_upgrade_path(current_version, model)
         verify_upgrade_path(upgrade_path, model)
-        
+
         if not print_upgrade_plan(current_version, model, upgrade_path, estimated_time, space_required):
             logger.info("Upgrade cancelled by user")
             return
@@ -685,42 +785,28 @@ def main():
         logger.info("Cleaning up BSP directory...")
         execute_command(ssh, f'rm -rf {REMOTE_BSP_DIR}', use_sudo=True)
         execute_command(ssh, f'mkdir -p {REMOTE_BSP_DIR}', use_sudo=True)
-        
+
         for version in upgrade_path:
-            logger.info(f"Starting upgrade to version {version}")
-            
             if sftp:
                 sftp.close()
-            sftp = get_sftp_session(ssh)
-            
+            sftp = ensure_sftp_session(ssh)
+
             try:
-                bsp_file = get_bsp_file_for_version(version, model)
-                upload_and_prepare_bsp(ssh, sftp, bsp_file)
-                initiate_bsp_upgrade(ssh)
-                monitor_upgrade_progress(ssh)
-                
-                sftp.close()
-                sftp = None
-                
-                ssh = reconnect_ssh()
-                logger.info("Waiting for system to stabilize...")
-                time.sleep(STABILIZATION_WAIT)
-                
+                upgrade_to_version(ssh, sftp, version, model)
+                initiate_bsp_upgrade(ssh, dry_run=dry_run)
             except Exception as e:
                 logger.error(f"Error during upgrade to version {version}: {str(e)}")
                 raise
             finally:
                 if sftp:
                     sftp.close()
-                if ssh:
-                    ssh.close()
-        
+
         final_version, _, _ = check_bsp_version(ssh)
         if final_version == TARGET_BSP_VERSION:
             logger.info(f"Upgrade successful! Final BSP version is {final_version}")
         else:
             raise Exception(f"Upgrade failed! Final version is {final_version}, expected {TARGET_BSP_VERSION}")
-        
+
     except Exception as e:
         logger.error(f"Upgrade process failed: {str(e)}")
         raise
@@ -730,7 +816,7 @@ def main():
                 sftp.close()
             except Exception as e:
                 logger.error(f"Error closing SFTP connection: {str(e)}")
-        
+
         if ssh:
             try:
                 ssh.close()
